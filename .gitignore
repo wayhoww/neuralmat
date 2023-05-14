@@ -1,0 +1,7 @@
+.slangpy_cache
+.vscode
+.cache
+__pycache__
+venv
+.temp
+latent.dds

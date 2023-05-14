@@ -1,0 +1,32 @@
+[CudaKernel]
+void brdf_kernel(TensorView<float> input, TensorView<float> output)
+{
+    uint3 globalIdx = cudaBlockIdx() * cudaBlockDim() + cudaThreadIdx();
+
+    if (globalIdx.x > input.size(0) || globalIdx.y > input.size(1))
+        return;
+
+    let dir_i = float3(input[globalIdx.x, 0], input[globalIdx.x, 1], input[globalIdx.x, 2]);
+    let dir_o = float3(input[globalIdx.x, 3], input[globalIdx.x, 4], input[globalIdx.x, 5]);
+
+    {{CONSTRUCT_STRUCT}}
+
+    float3 result = evaluate_brdf(dir_i, dir_o, params);
+    
+    output[globalIdx.x, 0] = result[0];
+    output[globalIdx.x, 1] = result[1];
+    output[globalIdx.x, 2] = result[2];
+}
+
+[TorchEntryPoint]
+TorchTensor<float> evaluate(TorchTensor<float> input)
+{
+    var result = TorchTensor<float>.alloc(input.size(0), 3);
+
+    let blockCount = uint3((input.size(0) + 63) / 64, 1, 1);
+    let groupSize = uint3(64, 1, 1);
+
+    __dispatch_kernel(brdf_kernel, blockCount, groupSize)(input, result);
+
+    return result;
+}
