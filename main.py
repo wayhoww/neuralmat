@@ -10,15 +10,22 @@ parameters.descriptors.append(
     neuralmat.data.ParameterDescriptor(
         name="albedo",
         n_channels=3,
-        texture=neuralmat.data.Texture("syq.jpg", srgb=True)
+        texture=neuralmat.data.Texture("test.png", srgb=True)
     )
 )
 
+resolution = parameters.descriptors[0].image.shape
+resolution = (resolution[1], resolution[0])
+
 material = neuralmat.data.SlangShaderMaterial("lambert", parameters)
-modelset = neuralmat.train.ModelSet(material, resolution=(2048, 2048), latent_dim=8)
-modelset.train(samples_per_epoch=100000, n_epochs=1000, lr=0.01, verbose=True)
-modelset.train(samples_per_epoch=100000, n_epochs=1000, lr=0.003, verbose=True)
-modelset.train(samples_per_epoch=100000, n_epochs=1000, lr=0.001, verbose=True)
+modelset = neuralmat.train.ModelSet(material, resolution=resolution, latent_dim=3)
+modelset.train(samples_per_epoch=100000, n_epochs=3000, lr=0.01,  verbose=True)
+modelset.train(samples_per_epoch=100000, n_epochs=3000, lr=0.003, verbose=True)
+modelset.train(samples_per_epoch=100000, n_epochs=3000, lr=0.001, verbose=True)
+modelset.begin_finetuning()
+modelset.train(samples_per_epoch=100000, n_epochs=3000, lr=0.003, verbose=True)
+modelset.train(samples_per_epoch=100000, n_epochs=3000, lr=0.001, verbose=True)
+modelset.train(samples_per_epoch=100000, n_epochs=3000, lr=0.0003, verbose=True)
 modelset.generate_code()
 
 with open(f"render/compiled.slang", "w") as f:
@@ -29,5 +36,5 @@ with open(f"render/resource_descs.py", "w") as f:
     source += material.generate_texture_descs_code()
     f.write(source)
 
-embeddig = modelset.encode_embeddings()
-neuralmat.image.write_dds("render/latent.dds", embeddig)
+latent_texture = modelset.generate_latent_texture()
+neuralmat.image.write_dds("render/latent.dds", latent_texture)

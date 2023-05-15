@@ -39,14 +39,17 @@ float3 evaluate_neural_brdf(float2 uv, float3 dir_in, float3 dir_out) {
         neural_in.value[i + 6] = _brdf_latent_texture.Sample(_brdf_sampler_default, float3(uv, i));
     }
 
-    LargeVector<3> neural_out = tanh(forward(neural_in));
-    return max(0, neural_out.to_vector());
+    let neural_out = exp(forward(neural_in).to_vector()) - 1;
+    return max(0, neural_out);
 }
 """
 
 
 class ModelSet:
     def __init__(self, material: data.Material, resolution: Tuple[int, int] = (256, 256), latent_dim: int = 8):
+        """
+        resolution: height * width
+        """ 
         self.material = material
         self.latent_dim = latent_dim
         self.n_features_in = 3
@@ -54,8 +57,7 @@ class ModelSet:
         self.encoder = model.MultiLayerPerceptron(n_features_in=self.n_features_in, n_features_out=self.latent_dim, n_features_hidden=64, n_hidden_layers=4).to(config.device())
         self.brdf_decoder = model.MultiLayerPerceptron(n_features_in=self.latent_dim+6, n_features_out=3, n_features_hidden=32, n_hidden_layers=3).to(config.device())
 
-        # TODO: finetunning
-        self.latent_texture = torch.nn.Embedding(self.resolution[0] * self.resolution[1], self.latent_dim).to(config.device())
+        self.latent_embeddings = None
         
         self.optimizer = torch.optim.Adam(list(self.encoder.parameters()) + list(self.brdf_decoder.parameters()))
 
@@ -78,15 +80,50 @@ class ModelSet:
         
         return parameters, torch.cat([dir_in, dir_out], dim=1), brdf
     
-    def encode_embeddings(self):
+    def sample_finetune(self, count: int):
+        rand_uniform = torch.rand(count, 2).to(config.device())
+
+        pos = torch.stack([
+            rand_uniform[:, 0] * self.resolution[0],
+            rand_uniform[:, 1] * self.resolution[1]
+        ], dim=1).type(torch.IntTensor).to(config.device())
+        pos[:, 0] = torch.clamp(pos[:, 0], 0, self.resolution[0] - 1)
+        pos[:, 1] = torch.clamp(pos[:, 1], 0, self.resolution[1] - 1)
+
+        uv = torch.stack([
+            pos[:, 0] / (self.resolution[0] - 1.0),
+            pos[:, 1] / (self.resolution[1] - 1.0)
+        ], dim=1)
+
+        dir_in = torch.randn(count, 3).to(config.device())
+        dir_out = torch.randn(count, 3).to(config.device())
+
+        dir_in = dir_in / torch.norm(dir_in, dim=1, keepdim=True)
+        dir_out = dir_out / torch.norm(dir_out, dim=1, keepdim=True)
+
+        _, brdf = self.material.evaluate(uv, dir_in, dir_out)
+
+        latent = self.latent_embeddings((pos[:, 1] * self.resolution[0] + pos[:, 0]))
+
+        return latent, torch.cat([dir_in, dir_out], dim=1), brdf
+
+    def begin_finetuning(self):
         us = torch.linspace(0, 1, self.resolution[0]).repeat(self.resolution[1]).to(config.device())
         vs = torch.linspace(0, 1, self.resolution[1]).repeat_interleave(self.resolution[0]).to(config.device())
         uvs = torch.stack([us, vs], dim=1)
         parameters = self.material.get_parameters(uvs).cpu()
-        latent = torch.tanh(self.encoder.cpu().forward(parameters.cpu()))
+        latent = torch.sigmoid(self.encoder.cpu().forward(parameters.cpu()))
         latent = latent.reshape(self.resolution[0], self.resolution[1], self.latent_dim)
-        latent_np = latent.cpu().detach().numpy()
-        return latent_np
+
+        assert self.latent_embeddings is None
+        self.latent_embeddings = torch.nn.Embedding(self.resolution[0] * self.resolution[1], self.latent_dim).to(config.device())
+        # self.latent_embeddings.weight.data.copy_(torch.zeros(self.resolution[0] * self.resolution[1], self.latent_dim).to(config.device()))
+        self.latent_embeddings.weight.data.copy_(latent.reshape(-1, self.latent_dim).to(config.device()))
+
+        self.optimizer = torch.optim.Adam(list(self.brdf_decoder.parameters())+ list(self.latent_embeddings.parameters()))
+
+    def generate_latent_texture(self):
+        return self.latent_embeddings.weight.data.detach().cpu().numpy().reshape(self.resolution[1], self.resolution[0], self.latent_dim)
 
     def train(self, samples_per_epoch: int, n_epochs: int, lr: float, verbose=False):
         for group in self.optimizer.param_groups:
@@ -95,11 +132,16 @@ class ModelSet:
         for epoch in range(n_epochs):
             self.optimizer.zero_grad()
 
-            parameters, direction, brdf_value = self.sample_end_to_end(samples_per_epoch)
-            latent = torch.tanh(self.encoder.forward(parameters))
-            brdf_pred = torch.tanh(self.brdf_decoder.forward(torch.cat([direction, latent], dim=1)))
+            if self.latent_embeddings is None:
+                parameters, direction, brdf_value = self.sample_end_to_end(samples_per_epoch)
+                latent = torch.sigmoid(self.encoder.forward(parameters))
+            else:
+                latent, direction, brdf_value = self.sample_finetune(samples_per_epoch)
 
-            loss = torch.nn.functional.mse_loss(brdf_pred, brdf_value)
+            log_brdf_pred = self.brdf_decoder.forward(torch.cat([direction, latent], dim=1))
+            log_brdf_real = torch.log(brdf_value + 1)
+
+            loss = torch.nn.functional.l1_loss(log_brdf_pred, log_brdf_real)
             loss.backward()
 
             self.optimizer.step()
